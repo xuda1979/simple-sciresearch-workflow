@@ -28,8 +28,28 @@ pip install openai
 
 export OPENAI_API_KEY=YOUR_API_KEY
 
+# Create a new paper
 python sciresearch_workflow.py --topic "quantum computing algorithms" --field "Computer Science" --question "How can error rates be reduced?" --output-dir ./output
+
+# Modify an existing paper (if paper.tex exists in output directory)
+python sciresearch_workflow.py --topic "quantum error correction" --field "Physics" --question "How can we improve quantum error correction codes?" --output-dir ./existing_paper_folder
+
+# Force modification of existing paper
+python sciresearch_workflow.py --topic "new research direction" --field "Computer Science" --question "New research question?" --output-dir ./existing_paper_folder --modify-existing
 ```
+
+### Modifying Existing Papers
+
+If your output directory already contains a `paper.tex` file, the script will automatically detect it and modify the existing paper instead of creating a new one. This is useful for:
+
+- Iterating on research ideas
+- Refining existing work
+- Exploring different research directions with the same base paper
+
+When modifying an existing paper:
+- The original paper is automatically backed up with a timestamp
+- The modified paper preserves the original structure and formatting
+- All sections are updated to reflect the new research direction
 
  The script will generate a research idea, write a paper into a timestamped subdirectory of the specified output directory (for example, `output/20250101_120000/paper.tex`), extract any Python code from `lstlisting` blocks into `code_<n>.py`, and then review and revise the paper if necessary.
 

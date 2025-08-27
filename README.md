@@ -6,10 +6,9 @@ This repository contains a simple automation pipeline that uses OpenAI's GPT-5 t
 
 - Prompt the user for a research topic, field, and specific research question (via command-line arguments or interactive prompts).
 - Generate a high-value, innovative and practical research idea using GPT-5.
- 
 - Draft a full-length research paper in LaTeX with sections (Abstract, Introduction, Related Work, Methodology, Experiments, Results, Discussion, Conclusion, References) and associated code, saved to a timestamped subdirectory inside the chosen output directory.
+- **Automatically detect and improve existing papers**: When a folder contains `paper.tex`, the system intelligently improves the existing work while preserving its core topic, field, and research question.
 - Peer review the generated paper using GPT-5 acting as a top journal reviewer and provide constructive feedback on rigor and clarity. The reviewer is instructed not to recommend rejection, and the editor must offer suggestions for improvement when the paper is not yet ready.
- 
 - Automatically decide whether the paper is ready for submission. If not, revise the paper based on the review feedback and produce a unified diff showing the changes.
 - Repeat the review→evaluation→revision cycle until the editor responds "YES" or a maximum iteration count is reached.
 - Apply the diff to update the paper and any associated code.

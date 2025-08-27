@@ -115,26 +115,114 @@ def write_paper(
     return call_openai(model, prompt, timeout=timeout, max_retries=max_retries)
 
 
-def review_paper(
+def review_and_revise_paper(
     paper_content: str,
     model: str,
     *,
     timeout: int | None,
     max_retries: int,
-) -> str:
-    """Ask the model to review the paper and give constructive feedback.
-
-    The reviewer must not recommend rejection; instead it should provide
-    actionable suggestions that help the authors improve the work to meet
-    top‑journal standards.
+) -> tuple[str, str, bool]:
+    """Review the paper and provide only the specific changes needed (diff format).
+    
+    Returns:
+        tuple[str, str, bool]: (review_feedback, diff_changes, is_ready)
     """
     prompt = (
-        "You are a top journal peer reviewer. Review the following research paper and provide "
-        "constructive, actionable feedback on its novelty, clarity of exposition, rigor of methodology, and significance. "
-        "Do not recommend rejection; instead, offer specific suggestions to improve the work so it can meet top-journal standards.\n\n"
-        f"Paper:\n{paper_content}"
+        "You are a top journal peer reviewer and editor. Your task is to:\n"
+        "1. Review this research paper for novelty, clarity, methodology rigor, and significance\n"
+        "2. Decide if it's ready for submission to a top journal\n"
+        "3. If NOT ready, provide ONLY the specific changes needed\n\n"
+        
+        "Response format:\n"
+        "=== EVALUATION ===\n"
+        "READY FOR SUBMISSION: [YES/NO]\n\n"
+        
+        "=== REVIEW FEEDBACK ===\n"
+        "[Provide constructive feedback on what needs improvement]\n\n"
+        
+        "=== CHANGES NEEDED ===\n"
+        "CHANGE 1:\n"
+        "LOCATION: [section name or approximate line]\n"
+        "ORIGINAL: [exact text to replace]\n"
+        "REVISED: [exact replacement text]\n\n"
+        
+        "CHANGE 2:\n"
+        "LOCATION: [section name or approximate line]\n"
+        "ORIGINAL: [exact text to replace]\n"
+        "REVISED: [exact replacement text]\n\n"
+        
+        "[Continue for all changes...]\n\n"
+        
+        "IMPORTANT: Only output specific changes that need to be made. Do NOT include the entire paper.\n"
+        "If ready for submission, simply state so in the evaluation section.\n\n"
+        f"Paper to review:\n{paper_content}"
     )
-    return call_openai(model, prompt, timeout=timeout, max_retries=max_retries)
+    
+    response = call_openai(model, prompt, timeout=timeout, max_retries=max_retries)
+    
+    # Parse the response to separate evaluation, feedback and changes
+    is_ready = False
+    feedback = ""
+    changes = ""
+    
+    try:
+        if "=== EVALUATION ===" in response:
+            eval_section = response.split("=== EVALUATION ===")[1].split("=== REVIEW FEEDBACK ===")[0]
+            is_ready = "YES" in eval_section.upper() and "READY FOR SUBMISSION" in eval_section.upper()
+        
+        if "=== REVIEW FEEDBACK ===" in response and "=== CHANGES NEEDED ===" in response:
+            parts = response.split("=== REVIEW FEEDBACK ===")[1].split("=== CHANGES NEEDED ===")
+            feedback = parts[0].strip()
+            changes = parts[1].strip() if len(parts) > 1 else ""
+        elif "=== REVIEW FEEDBACK ===" in response:
+            feedback = response.split("=== REVIEW FEEDBACK ===")[1].strip()
+        else:
+            # Fallback if format is not followed
+            feedback = response[:500] + "..." if len(response) > 500 else response
+            
+    except Exception as e:
+        print(f"Warning: Could not parse response format: {e}")
+        feedback = response
+        is_ready = "ready for submission" in response.lower() or "yes" in response.lower()
+    
+    return feedback, changes, is_ready
+
+
+def apply_diff_changes(paper_content: str, changes: str) -> str:
+    """Apply diff-style changes to paper content."""
+    if not changes or changes.strip() == "":
+        return paper_content
+        
+    change_blocks = re.split(r'CHANGE \d+:', changes)
+    modified_content = paper_content
+    changes_applied = 0
+    
+    for block in change_blocks[1:]:  # Skip empty first split
+        try:
+            # Extract location, original, and revised text
+            location_match = re.search(r'LOCATION:\s*(.*?)(?=\n)', block)
+            original_match = re.search(r'ORIGINAL:\s*(.*?)\s*REVISED:', block, re.DOTALL)
+            revised_match = re.search(r'REVISED:\s*(.*?)(?=\n\n|CHANGE|\Z)', block, re.DOTALL)
+            
+            if original_match and revised_match:
+                original_text = original_match.group(1).strip()
+                revised_text = revised_match.group(1).strip()
+                location = location_match.group(1).strip() if location_match else "Unknown"
+                
+                # Apply the change (replace first occurrence)
+                if original_text in modified_content:
+                    modified_content = modified_content.replace(original_text, revised_text, 1)
+                    changes_applied += 1
+                    print(f"✓ Applied change {changes_applied} in {location}")
+                else:
+                    print(f"⚠ Warning: Could not find original text in {location}")
+                    
+        except Exception as e:
+            print(f"⚠ Warning: Could not parse change block. Error: {e}")
+            continue
+    
+    print(f"Applied {changes_applied} changes total.")
+    return modified_content
 
 
 def evaluate_paper(
@@ -275,26 +363,28 @@ def extract_paper_metadata(paper_content: str) -> tuple[str, str, str]:
     return topic, field, question
 
 
-def save_paper_and_code(paper_content: str, output_dir: Path | str) -> Path:
+def save_paper_and_code(paper_content: str, output_dir: Path | str, filename: str = "paper.tex") -> Path:
     """Save the paper and Python snippets to a unique subdirectory.
 
     A timestamped subfolder is created inside ``output_dir`` so multiple
     papers can coexist. If ``output_dir`` already points to an existing paper
-    directory (containing ``paper.tex``), files are updated in place. Python
+    directory (containing any .tex file), files are updated in place. Python
     code blocks contained in LaTeX ``lstlisting`` environments are extracted to
-    ``code_<n>.py`` files. The directory where ``paper.tex`` and code files are
+    ``code_<n>.py`` files. The directory where the .tex and code files are
     written is returned for subsequent steps.
     """
     base_path = Path(output_dir)
 
-    if (base_path / "paper.tex").exists():
+    # Check if there's already a .tex file in the directory
+    existing_tex = find_tex_file(base_path) if base_path.exists() else None
+    if existing_tex:
         paper_dir = base_path
+        paper_path = existing_tex  # Keep original filename
     else:
         base_path.mkdir(parents=True, exist_ok=True)
         paper_dir = base_path / datetime.now().strftime("%Y%m%d_%H%M%S")
         paper_dir.mkdir(parents=True, exist_ok=True)
-
-    paper_path = paper_dir / "paper.tex"
+        paper_path = paper_dir / filename
 
     paper_path.write_text(paper_content, encoding="utf-8")
 
@@ -325,6 +415,18 @@ def apply_diff_and_save(original_path: Path, new_content: str) -> str:
     # write revised content
     original_path.write_text(new_content, encoding="utf-8")
     return diff_text
+
+
+def find_tex_file(output_dir: Path) -> Path | None:
+    """Find any .tex file in the output directory."""
+    tex_files = list(output_dir.glob("*.tex"))
+    if tex_files:
+        # Prefer paper.tex if it exists, otherwise return the first .tex file found
+        paper_tex = output_dir / "paper.tex"
+        if paper_tex.exists():
+            return paper_tex
+        return tex_files[0]
+    return None
 
 
 def main():
@@ -390,29 +492,29 @@ def main():
     client = OpenAI(**client_kwargs)
 
     try:
-        # Check if output directory already contains a paper.tex file
+        # Check if output directory already contains any .tex file
         output_path = Path(args.output_dir)
-        existing_paper_path = output_path / "paper.tex"
+        existing_tex_path = find_tex_file(output_path) if output_path.exists() else None
         
-        if existing_paper_path.exists() and not args.force_new_paper:
-            print(f"Found existing paper at {existing_paper_path}")
+        if existing_tex_path and not args.force_new_paper:
+            print(f"Found existing paper at {existing_tex_path}")
             print("Starting iterative improvement of existing paper...")
             print("(Use --force-new-paper to create a new paper instead)")
             
             # Read existing paper content
-            existing_paper_content = existing_paper_path.read_text(encoding="utf-8")
+            existing_paper_content = existing_tex_path.read_text(encoding="utf-8")
             
             # Extract metadata from existing paper
             detected_topic, detected_field, detected_question = extract_paper_metadata(existing_paper_content)
             
-            # Use detected metadata or command line arguments
-            topic = args.topic or detected_topic
-            field = args.field or detected_field  
-            question = args.question or detected_question
+            # Use detected metadata (no need for user input when existing paper found)
+            topic = detected_topic
+            field = detected_field  
+            question = detected_question
             
-            print(f"Detected/Using - Topic: {topic}")
-            print(f"Detected/Using - Field: {field}")
-            print(f"Detected/Using - Question: {question}")
+            print(f"Detected - Topic: {topic}")
+            print(f"Detected - Field: {field}")
+            print(f"Detected - Question: {question}")
             
             # Perform iterative improvement without changing core topic/field/question
             paper_content = iteratively_improve_paper(
@@ -422,20 +524,21 @@ def main():
                 max_retries=args.max_retries,
             )
             
-            # Save the improved paper in the same directory
+            # Save the improved paper in the same directory, preserving original filename
             paper_dir = output_path
-            paper_path = existing_paper_path
+            paper_path = existing_tex_path
             
             # Create a backup of the original
-            backup_path = output_path / f"paper_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tex"
+            backup_name = f"{existing_tex_path.stem}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tex"
+            backup_path = output_path / backup_name
             backup_path.write_text(existing_paper_content, encoding="utf-8")
             print(f"Original paper backed up to {backup_path}")
             
         elif args.modify_existing:
-            if not existing_paper_path.exists():
-                raise FileNotFoundError(f"--modify-existing specified but no paper.tex found in {output_path}")
+            if not existing_tex_path:
+                raise FileNotFoundError(f"--modify-existing specified but no .tex file found in {output_path}")
                 
-            print(f"Found existing paper at {existing_paper_path}")
+            print(f"Found existing paper at {existing_tex_path}")
             print("Modifying existing paper with new research direction...")
             
             # Ensure we have all required parameters for modification
@@ -447,7 +550,7 @@ def main():
                 args.question = input("Enter research question: ").strip()
                 
             # Read existing paper content
-            existing_paper_content = existing_paper_path.read_text(encoding="utf-8")
+            existing_paper_content = existing_tex_path.read_text(encoding="utf-8")
             
             # Step 1: Generate research idea for modification
             idea = generate_idea(
@@ -472,12 +575,13 @@ def main():
                 max_retries=args.max_retries,
             )
             
-            # Save the modified paper in the same directory
+            # Save the modified paper in the same directory, preserving original filename
             paper_dir = output_path
-            paper_path = existing_paper_path
+            paper_path = existing_tex_path
             
             # Create a backup of the original
-            backup_path = output_path / f"paper_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tex"
+            backup_name = f"{existing_tex_path.stem}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tex"
+            backup_path = output_path / backup_name
             backup_path.write_text(existing_paper_content, encoding="utf-8")
             print(f"Original paper backed up to {backup_path}")
             
@@ -520,40 +624,32 @@ def main():
 
         # Proceed with review-modify cycles
         for iteration in range(1, args.max_iters + 1):
-            print(f"\n--- Review Cycle {iteration} ---")
-            feedback = review_paper(
+            print(f"\n{'='*50}")
+            print(f"ITERATION {iteration}")
+            print(f"{'='*50}")
+            
+            # Review and revise the paper in one step
+            feedback, changes, is_ready = review_and_revise_paper(
                 paper_content,
                 args.model,
                 timeout=args.request_timeout,
-                max_retries=args.max_retries,
+                max_retries=args.max_retries
             )
+            
             print(f"Reviewer Feedback:\n{feedback}\n")
-
-            decision = evaluate_paper(
-                paper_content,
-                feedback,
-                args.model,
-                timeout=args.request_timeout,
-                max_retries=args.max_retries,
-            )
-            print(f"Editor Decision: {decision}\n")
-            if decision.strip().upper().startswith("YES"):
-                print("Paper is ready for submission. Workflow completed.")
+            
+            # Check if paper is ready
+            if is_ready:
+                print("✅ Paper meets publication standards!")
+                print(f"Total iterations completed: {iteration}")
                 break
-
-            combined_feedback = feedback + "\n\nEditor Suggestions:\n" + decision
-            revised_content = revise_paper(
-                paper_content,
-                combined_feedback,
-                args.model,
-                timeout=args.request_timeout,
-                max_retries=args.max_retries,
-            )
-            diff_text = apply_diff_and_save(paper_path, revised_content)
-            save_paper_and_code(revised_content, paper_dir)
-            print("Paper revised and saved. Diff between versions:\n")
-            print(diff_text)
-            paper_content = revised_content
+            
+            # Apply the diff changes
+            paper_content = apply_diff_changes(paper_content, changes)
+            
+            # Save the updated paper with correct filename
+            save_paper_and_code(paper_content, paper_dir, paper_path.name)
+            print("Paper revised and saved.\n")
         else:
             print("Maximum review iterations reached without editor approval.")
     except KeyboardInterrupt:
